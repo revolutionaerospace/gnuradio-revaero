@@ -25,6 +25,9 @@ static const pmt::pmt_t ASYNC_MSGS_PORT_KEY = pmt::string_to_symbol("async_msgs"
 static const pmt::pmt_t ASYNC_MSG_KEY = pmt::string_to_symbol("uhd_async_msg");
 static const pmt::pmt_t EVENT_CODE_OVERFLOW = pmt::string_to_symbol("overflows");
 
+static const pmt::pmt_t GPS_LAT_KEY = pmt::string_to_symbol("rx_lat");
+static const pmt::pmt_t GPS_LONG_KEY = pmt::string_to_symbol("rx_long");
+
 namespace gr {
 namespace uhd {
 
@@ -77,7 +80,7 @@ public:
     std::vector<std::string> get_filter_names(const size_t chan) override;
     ::uhd::filter_info_base::sptr get_filter(const std::string& path,
                                              const size_t chan) override;
-
+    void get_gps_position(pmt::pmt_t* longitude_tuple, pmt::pmt_t* latitude_tuple);
     // Set Commands
     void set_subdev_spec(const std::string& spec, size_t mboard) override;
     void set_samp_rate(double rate) override;
@@ -157,6 +160,11 @@ private:
     double _samp_rate;
 
     std::mutex d_mutex;
+
+    // tag timer
+    // variable to indicate how frequently we should add tags to the rx stream
+    float _tag_timer_duration_ms;
+    std::chrono::system_clock::time_point _tag_timer_start;
 
     const pmt::pmt_t _direction() const override { return direction_rx(); };
 };

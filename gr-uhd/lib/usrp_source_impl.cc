@@ -55,6 +55,9 @@ usrp_source_impl::usrp_source_impl(const ::uhd::device_addr_t& device_addr,
                              [this](const pmt::pmt_t& tag, const int, const pmt::pmt_t&) {
                                  this->_cmd_handler_tag(tag);
                              });
+    // setup the timer for the tag duration
+    _tag_timer_start = std::chrono::system_clock::now();
+    _tag_timer_duration_ms = 4000;
 }
 
 usrp_source_impl::~usrp_source_impl() {}
@@ -611,22 +614,79 @@ int usrp_source_impl::work(int noutput_items,
     return 0;
 }
 
+
+/*
+ * Get GPS coordinates for data in current buffer
+ *
+ * This will ping the GPS daemon on the USRP (_dev in usrp_block) to return GPS
+ * data in the GPGGA String Format
+ * the format is described here
+ * https://docs.novatel.com/OEM7/Content/Logs/GPGGA.htm
+ * An example is given as:
+ *   gpgga: $GPGGA,035909.000,2725.7570,S,15256.0568,E,1,03,2.62,89.675000,M,,,,,*01
+ *                            ^Latitude   ^Longitude
+ * Latitude:  DDmm.mm
+ * Longitude: DDDmm.mm
+ * can see the corresponding direction for the GPS info as a char
+ * following long/latitude
+ *
+ * We will extract this data into the class variables _lat_deg, _lat_dir etc.
+ */
+void usrp_source_impl::get_gps_position(pmt::pmt_t* longitude_tuple,
+                                        pmt::pmt_t* latitude_tuple)
+{
+    // the clocks here are just for timing info on the call to the GPS
+    // this is just useful for examining how long the operation takes
+    auto start = std::chrono::steady_clock::now();
+    ::uhd::sensor_value_t gps_data = _dev->get_mboard_sensor("gps_gpgga");
+    auto end = std::chrono::steady_clock::now();
+    const std::chrono::duration<double, std::milli> diff = end - start;
+    // uncomment this if want to get timing information printed out
+    // std::cout << "time gps pos call = " << diff.count() << " milliseconds" <<
+    // std::endl;
+    std::string gps_data_str = gps_data.to_pp_string();
+    std::cout << gps_data_str << std::endl;
+    // convert gps data into tag
+    std::string lat_deg = gps_data_str.substr(25, 2);
+    std::string lat_min = gps_data_str.substr(27, 7);
+    std::string lat_dir = gps_data_str.substr(35, 1);
+    std::string long_deg = gps_data_str.substr(37, 3);
+    std::string long_min = gps_data_str.substr(40, 7);
+    std::string long_dir = gps_data_str.substr(48, 1);
+    *latitude_tuple =
+        pmt::make_tuple(pmt::intern(lat_deg), pmt::intern(lat_min), pmt::intern(lat_dir));
+    *longitude_tuple = pmt::make_tuple(
+        pmt::intern(long_deg), pmt::intern(long_min), pmt::intern(long_dir));
+}
+
+
 int usrp_source_impl::try_work(int noutput_items,
                                gr_vector_const_void_star& input_items,
                                gr_vector_void_star& output_items)
 {
     boost::this_thread::disable_interruption disable_interrupt;
+    pmt::pmt_t latitude_tuple;
+    pmt::pmt_t longitude_tuple;
     // In order to allow for low-latency:
     // We receive all available packets without timeout.
     // This call can timeout under regular operation...
     size_t num_samps = _rx_stream->recv(
         output_items, noutput_items, _metadata, _recv_timeout, _recv_one_packet);
     boost::this_thread::restore_interruption restore_interrupt(disable_interrupt);
-
+    // check if the tag timer has elapsed
+    auto tag_timer_end = std::chrono::system_clock::now();
+    const std::chrono::duration<double, std::milli> diff =
+        tag_timer_end - _tag_timer_start;
+    // std::cout << "time gps pos call = " << diff.count() << " milliseconds" <<
+    // std::endl; const std::chrono::duration<double, std::milli> diff = end - start;
     // handle possible errors conditions
     switch (_metadata.error_code) {
     case ::uhd::rx_metadata_t::ERROR_CODE_NONE:
-        if (_tag_now) {
+        // add tags if it is the first sample, or if the gps is enabled and we
+        // the duration has elapsed
+        if ((_tag_now) || ((get_time_source(0) == "gpsdo") &&
+                           (diff.count() > _tag_timer_duration_ms))) {
+            std::cout << "_tag_now" << _tag_now << std::endl;
             _tag_now = false;
             // create a timestamp pmt for the first sample
             const pmt::pmt_t val =
@@ -643,6 +703,21 @@ int usrp_source_impl::try_work(int noutput_items,
                                    pmt::from_double(this->get_center_freq(i)),
                                    _id);
             }
+            // try and print out gps info
+            if (get_time_source(0) == "gpsdo") {
+                // update the GPS tag timer variable
+                _tag_timer_start = std::chrono::system_clock::now();
+                // get GPS vars and update the tag tuple
+                get_gps_position(&latitude_tuple, &longitude_tuple);
+                for (size_t i = 0; i < _nchan; i++) {
+                    this->add_item_tag(
+                        i, nitems_written(0), GPS_LAT_KEY, latitude_tuple, _id);
+                    this->add_item_tag(
+                        i, nitems_written(0), GPS_LONG_KEY, longitude_tuple, _id);
+                }
+            }
+            // std::cout << this->get_time_source() << std::endl;
+            // std::cout << get_time_source(0) << std::endl;
         }
         break;
 
